@@ -1,0 +1,1201 @@
+<script>
+const S = {
+  lang: 'kh',
+  boot: null,
+  module: 'dashboard',
+  rows: [],
+  editId: null,
+  requestSeq: {},
+  page: {},
+  pageSize: 100,
+  hasMore: {},
+  busy: 0,
+  saving: false,
+  toastTimer: null,
+  modalBusy: false
+};
+
+const NAV = [
+  ['dashboard','fa-gauge','ផ្ទាំងគ្រប់គ្រង','Dashboard'],
+  ['projects','fa-diagram-project','គម្រោង','Projects'],
+  ['plan','fa-list-check','ផែនការលទ្ធកម្ម','Procurement Plans'],
+  ['budget','fa-money-bill-transfer','សំណើថវិកា','Budget Requests'],
+  ['bidding','fa-gavel','ដំណើរការដេញថ្លៃ','Bidding'],
+  ['suppliers','fa-building','អ្នកផ្គត់ផ្គង់','Suppliers'],
+  ['bids','fa-file-signature','សំណើដេញថ្លៃ','Bids'],
+  ['evaluations','fa-clipboard-check','ការវាយតម្លៃ','Evaluations'],
+  ['contracts','fa-file-contract','កិច្ចសន្យា','Contracts'],
+  ['payments','fa-credit-card','ការទូទាត់','Payments'],
+  ['variations','fa-arrows-rotate','ការកែប្រែ','Variations'],
+  ['deliveries','fa-truck','ការប្រគល់ / អនុវត្ត','Deliveries'],
+  ['handover','fa-handshake','ប្រគល់-ទទួល','Handover'],
+  ['warranty','fa-shield-halved','ការធានា','Warranty'],
+  ['defects','fa-triangle-exclamation','បញ្ហាក្នុងការធានា','Warranty Defects'],
+  ['documents','fa-folder-open','ឯកសារ','Documents'],
+  ['reports','fa-chart-column','របាយការណ៍','Reports'],
+  ['dataquality','fa-shield-halved','គុណភាពទិន្នន័យ','Data Quality'],
+  ['users','fa-users-gear','អ្នកប្រើប្រាស់','Users'],
+  ['audit','fa-clock-rotate-left','Audit Log','Audit Log']
+];
+
+function rpc(name, ...args) {
+  return new Promise((resolve, reject) => {
+    google.script.run
+      .withSuccessHandler(resolve)
+      .withFailureHandler(reject)[name](...args);
+  });
+}
+
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#039;'
+  }[c]));
+}
+
+function money(value) {
+  return Number(value || 0).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+}
+
+function msg(kh, en) {
+  return S.lang === 'kh' ? kh : en;
+}
+
+function errorText(error) {
+  return error && error.message ? error.message : String(error || 'Unknown error');
+}
+
+function spinner(text) {
+  return `<span class="spinner" aria-hidden="true"></span><span>${esc(text || msg('កំពុងដំណើរការ...','Processing...'))}</span>`;
+}
+
+function blueLoadingScreen(show, text, subtext, mode = 'system') {
+  let el = document.getElementById('blue-loading-screen');
+  if (!show) {
+    if (el) {
+      el.classList.remove('show');
+      el.setAttribute('aria-hidden', 'true');
+      window.setTimeout(() => el.remove(), 260);
+    }
+    return;
+  }
+
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'blue-loading-screen';
+    el.className = 'blue-loading-screen';
+    el.setAttribute('aria-hidden', 'false');
+    el.innerHTML = `
+      <div class="blue-loading-bg"></div>
+      <div class="blue-loading-card" role="status" aria-live="polite">
+        <div class="blue-loading-brand">
+          <div class="blue-loading-brand-mark">▣</div>
+          <div>
+            <div class="blue-loading-brand-title">Procurement CMS</div>
+            <div class="blue-loading-brand-sub">Contract &amp; Procurement Lifecycle Management</div>
+          </div>
+        </div>
+        <div class="blue-loading-spinner"><span></span></div>
+        <div id="blue-loading-text" class="blue-loading-text"></div>
+        <div id="blue-loading-subtext" class="blue-loading-subtext"></div>
+        <div class="blue-loading-progress"><span></span></div>
+      </div>`;
+    document.body.appendChild(el);
+    requestAnimationFrame(() => el.classList.add('show'));
+  } else {
+    el.classList.add('show');
+    el.setAttribute('aria-hidden', 'false');
+  }
+
+  const title = document.getElementById('blue-loading-text');
+  const sub = document.getElementById('blue-loading-subtext');
+  if (title) title.textContent = text || msg('កំពុងផ្ទុកប្រព័ន្ធ...','Loading system...');
+  if (sub) sub.textContent = subtext || msg('សូមរង់ចាំបន្តិច...','Please wait...');
+
+  el.dataset.mode = mode;
+}
+
+function setBusy(on, text) {
+  S.busy = Math.max(0, S.busy + (on ? 1 : -1));
+  const bar = document.getElementById('top-loader');
+  if (bar) bar.classList.toggle('show', S.busy > 0);
+  if (text) {
+    const status = document.getElementById('top-loading-text');
+    if (status) status.textContent = text;
+  }
+}
+
+function setButtonBusy(btn, on, text) {
+  if (!btn) return;
+  if (on) {
+    if (!btn.dataset.oldHtml) btn.dataset.oldHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    btn.classList.add('is-loading');
+    btn.innerHTML = spinner(text);
+  } else {
+    btn.disabled = false;
+    btn.removeAttribute('aria-busy');
+    btn.classList.remove('is-loading');
+    if (btn.dataset.oldHtml !== undefined) {
+      btn.innerHTML = btn.dataset.oldHtml;
+      delete btn.dataset.oldHtml;
+    }
+  }
+}
+
+function setModalBusy(on, text, subtext) {
+  const modal = document.querySelector('.modal');
+  if (!modal) return;
+
+  let overlay = document.getElementById('modal-busy');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'modal-busy';
+    overlay.className = 'modal-busy';
+    overlay.innerHTML = `
+      <div class="modal-busy-card">
+        <div class="modal-busy-spinner"><div class="spinner big"></div></div>
+        <div id="modal-busy-text" class="modal-busy-text"></div>
+        <div id="modal-busy-subtext" class="modal-busy-subtext"></div>
+      </div>`;
+    modal.appendChild(overlay);
+  }
+
+  document.getElementById('modal-busy-text').textContent = text || msg('កំពុងរក្សាទុក...','Saving...');
+  document.getElementById('modal-busy-subtext').textContent = subtext || '';
+  overlay.classList.toggle('show', !!on);
+  modal.classList.toggle('processing', !!on);
+  S.modalBusy = !!on;
+}
+
+function closeModal(force = false) {
+  if (S.modalBusy && !force) return;
+  S.modalBusy = false;
+  const modalBg = document.getElementById('modal-bg');
+  if (modalBg) modalBg.style.display = 'none';
+  const modal = document.querySelector('.modal');
+  if (modal) modal.classList.remove('processing');
+}
+
+function showModal(title, body, foot) {
+  const titleEl = document.getElementById('modal-title');
+  const bodyEl = document.getElementById('modal-body');
+  const footEl = document.getElementById('modal-foot');
+  const modalBg = document.getElementById('modal-bg');
+  if (!titleEl || !bodyEl || !footEl || !modalBg) return;
+
+  titleEl.textContent = title || '';
+  bodyEl.innerHTML = body || '';
+  footEl.innerHTML = foot || '';
+  modalBg.style.display = 'flex';
+  setModalBusy(false);
+}
+
+function pageLoading(text) {
+  const view = document.getElementById('view');
+  if (!view) return;
+  view.innerHTML = `
+    <div class="page-loading">
+      <div class="loading-orbit"><div class="spinner big"></div></div>
+      <b>${esc(text || msg('កំពុងផ្ទុកទិន្នន័យ...','Loading data...'))}</b>
+      <div class="muted">${esc(msg('សូមរង់ចាំបន្តិច...','Please wait...'))}</div>
+    </div>`;
+}
+
+function dashboardLoading() {
+  const view = document.getElementById('view');
+  if (!view) return;
+  view.innerHTML = `
+    <div class="title-skeleton skeleton-line"></div>
+    <div class="subtitle-skeleton skeleton-line"></div>
+    <div class="grid4 loading-kpis">
+      ${Array.from({length: 8}, () => `<div class="card kpi skeleton-card"><div class="skeleton-line sm"></div><div class="skeleton-line lg"></div></div>`).join('')}
+    </div>
+    <div class="skeleton-section-title skeleton-line"></div>
+    <div class="pipeline">
+      ${Array.from({length: 8}, () => `<div class="stage skeleton-stage"><div class="skeleton-line sm"></div><div class="skeleton-line md"></div><div class="skeleton-line xs"></div></div>`).join('')}
+    </div>`;
+}
+
+function tableLoading(columnCount = 7) {
+  const el = document.getElementById('table');
+  if (!el) return;
+  const cols = Math.max(3, Math.min(9, Number(columnCount) || 7));
+  el.innerHTML = `
+    <div class="table-skeleton">
+      <div class="skeleton-row skeleton-head" style="--cols:${cols}">
+        ${Array.from({length: cols}, () => '<div class="skeleton-cell"></div>').join('')}
+      </div>
+      ${Array.from({length: 6}, () => `
+        <div class="skeleton-row" style="--cols:${cols}">
+          ${Array.from({length: cols}, () => '<div class="skeleton-cell"></div>').join('')}
+        </div>`).join('')}
+    </div>`;
+}
+
+function tableEmpty(text) {
+  return `<div class="empty"><div class="empty-icon">⌕</div><div>${esc(text || msg('រកមិនឃើញទិន្នន័យ','No records found.'))}</div></div>`;
+}
+
+function renderNav() {
+  const nav = document.getElementById('nav');
+  if (!nav || !S.boot) return;
+
+  nav.innerHTML = NAV.map(item => {
+    const cap = (S.boot.capabilities && S.boot.capabilities[item[0]]) || null;
+    if (cap && !cap.view && !['dashboard','reports','dataquality','users','audit'].includes(item[0])) return '';
+    return `
+      <div class="nav ${S.module === item[0] ? 'active' : ''}" onclick="navigate('${item[0]}')">
+        <i class="fa-solid ${item[1]}"></i>
+        <span class="${S.lang === 'kh' ? 'kh' : ''}">${esc(S.lang === 'kh' ? item[2] : item[3])}</span>
+      </div>`;
+  }).join('');
+}
+
+function label(module) {
+  const x = S.boot && S.boot.modules ? S.boot.modules[module] : null;
+  return x ? (S.lang === 'kh' ? x.titleKh : x.titleEn) : module;
+}
+
+function fl(field) {
+  return S.lang === 'kh'
+    ? (field.kh || field.en || field.name)
+    : (field.en || field.name);
+}
+
+function toggleLang() {
+  S.lang = S.lang === 'kh' ? 'en' : 'kh';
+  drawShell();
+  navigate(S.module);
+}
+
+async function init() {
+  const root = document.getElementById('root');
+  if (!root) return;
+
+  root.innerHTML = '';
+  blueLoadingScreen(
+    true,
+    msg('កំពុងផ្ទុកប្រព័ន្ធ...','Loading system...'),
+    msg('កំពុងផ្ទុកទិន្នន័យ និងសិទ្ធិអ្នកប្រើប្រាស់','Loading data and user permissions'),
+    'system'
+  );
+
+  try {
+    const result = await rpc('bootstrap');
+    if (!result || !result.success) {
+      blueLoadingScreen(false);
+      root.innerHTML = `<div class="empty error-empty">${esc(result && result.message ? result.message : msg('មិនអាចផ្ទុកប្រព័ន្ធបាន','Unable to load the system.'))}</div>`;
+      return;
+    }
+
+    S.boot = result.data;
+    drawShell();
+    blueLoadingScreen(false);
+    await navigate('dashboard');
+  } catch (error) {
+    blueLoadingScreen(false);
+    root.innerHTML = `<div class="empty error-empty">${esc(errorText(error))}</div>`;
+  }
+}
+
+function drawShell() {
+  const root = document.getElementById('root');
+  if (!root || !S.boot) return;
+
+  root.innerHTML = `
+    <div class="app">
+      <aside class="side">
+        <div class="brand">
+          <div class="brand-mark">▣</div>
+          <div class="brand-copy"><span>Procurement CMS</span><small>${esc(APP_NAME)}</small></div>
+        </div>
+        <div id="nav"></div>
+      </aside>
+
+      <main class="main">
+        <div id="top-loader" class="top-loader" role="progressbar" aria-hidden="true"></div>
+        <div id="top-loading-text" class="sr-only">${esc(msg('កំពុងដំណើរការ...','Processing...'))}</div>
+        <header class="top">
+          <div class="top-title-wrap">
+            <strong>${esc(APP_NAME)}</strong>
+            <span class="top-status-dot"></span>
+          </div>
+          <div class="top-actions">
+            <input id="global" class="input search" placeholder="${S.lang === 'kh' ? 'ស្វែងរក...':'Search...'}" aria-label="Search">
+            <button class="btn secondary lang-btn" onclick="toggleLang()">${S.lang.toUpperCase()}</button>
+            <div class="user">
+              <div class="avatar">${esc((S.boot.user.name || 'U').slice(0, 1).toUpperCase())}</div>
+              <div class="user-copy"><b>${esc(S.boot.user.name || '')}</b><div class="muted">${esc(S.boot.user.role || '')}</div></div>
+            </div>
+          </div>
+        </header>
+        <section class="content" id="view"></section>
+      </main>
+    </div>
+
+    <div id="modal-bg" class="modal-bg" onclick="if(event.target===this)closeModal()" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="mh">
+          <b id="modal-title"></b>
+          <button class="btn secondary modal-close-btn" onclick="closeModal()" aria-label="Close">×</button>
+        </div>
+        <div class="mb" id="modal-body"></div>
+        <div class="mf" id="modal-foot"></div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>`;
+
+  renderNav();
+  const global = document.getElementById('global');
+  if (global) {
+    global.addEventListener('keydown', event => {
+      if (event.key === 'Enter') globalSearch(event.target.value);
+    });
+  }
+}
+
+async function navigate(module) {
+  S.module = module;
+  renderNav();
+
+  if (module === 'dashboard') return dashboard();
+  if (module === 'reports') return reports();
+  if (module === 'dataquality') return dataQuality();
+  if (module === 'users') return users();
+  if (module === 'audit') return audit();
+  return moduleList(module);
+}
+
+async function dashboard() {
+  dashboardLoading();
+  setBusy(true, msg('កំពុងផ្ទុកផ្ទាំងគ្រប់គ្រង...','Loading dashboard...'));
+
+  try {
+    const result = await rpc('apiDashboard');
+    if (!result || !result.success) {
+      toast(result && result.message ? result.message : msg('មិនអាចផ្ទុកទិន្នន័យបាន','Unable to load data.'), 'error');
+      return;
+    }
+
+    const data = result.data || {};
+    const k = data.kpis || {};
+    const pipeline = Array.isArray(data.pipeline) ? data.pipeline : [];
+
+    document.getElementById('view').innerHTML = `
+      <div class="title">${S.lang === 'kh' ? 'ផ្ទាំងគ្រប់គ្រង' : 'Dashboard'}</div>
+      <div class="subtitle">${S.lang === 'kh' ? 'សង្ខេបលទ្ធកម្ម និងកិច្ចសន្យា' : 'Procurement and contract overview'}</div>
+
+      <div class="grid4" style="margin-top:15px">
+        ${[
+          ['គម្រោង','Projects',k.projects],
+          ['ផែនការ','Plans',k.plans],
+          ['ថវិកាសរុប','Total Budget',money(k.totalBudget)],
+          ['ធានាចំណាយ','Approved Budget',money(k.approvedBudget)],
+          ['កិច្ចសន្យា','Contracts',k.contracts],
+          ['តម្លៃកិច្ចសន្យា','Current Contract Value',money(k.currentContractValue)],
+          ['បានទូទាត់','Total Paid',money(k.totalPaid)],
+          ['នៅសល់','Remaining Balance',money(k.remainingBalance)],
+          ['ដេញថ្លៃសកម្ម','Active Bidding',k.activeBidding],
+          ['កិច្ចសន្យាសកម្ម','Active Contracts',k.activeContracts],
+          ['ធានាជិតផុត','Expiring Warranty',k.expiringWarranty],
+          ['បញ្ហាកំពុងបើក','Open Defects',k.openDefects]
+        ].map(x => `
+          <div class="card kpi">
+            <div class="l">${esc(S.lang === 'kh' ? x[0] : x[1])}</div>
+            <div class="v">${esc(x[2])}</div>
+          </div>`).join('')}
+      </div>
+
+      <div class="section-title-row">
+        <div class="section-title">${S.lang === 'kh' ? 'វឌ្ឍនភាព ៨ ដំណាក់កាល' : '8-Stage Lifecycle'}</div>
+      </div>
+      <div class="pipeline" style="margin-top:10px">
+        ${pipeline.map(x => `
+          <div class="stage">
+            <div class="muted">${esc(x.stage)}</div>
+            <b>${esc(x.count)}</b>
+            <div class="prog"><i style="width:${Math.min(100, Number(x.percentage || 0))}%"></i></div>
+            <div class="muted">${esc(x.percentage)}%</div>
+          </div>`).join('')}
+      </div>`;
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function moduleList(module) {
+  const cap = (S.boot.capabilities && S.boot.capabilities[module]) || {};
+  const x = S.boot.modules[module];
+  if (!x) {
+    document.getElementById('view').innerHTML = tableEmpty(msg('មិនស្គាល់ Module','Unknown module'));
+    return;
+  }
+
+  const createLabel = S.lang === 'kh' ? 'បង្កើតថ្មី' : 'Create New';
+  document.getElementById('view').innerHTML = `
+    <div class="page-head">
+      <div>
+        <div class="title">${esc(label(module))}</div>
+        <div class="subtitle">${esc(x.sheet)}</div>
+      </div>
+      <button class="btn primary" ${cap.create ? '' : 'disabled'} onclick="openCreate('${module}')">+ ${createLabel}</button>
+    </div>
+
+    <div class="card list-card">
+      <div class="toolbar">
+        <div class="search-field-wrap">
+          <span class="search-icon">⌕</span>
+          <input id="q" class="input" style="max-width:330px;padding-left:32px" placeholder="${S.lang === 'kh' ? 'ស្វែងរក...' : 'Search...'}">
+        </div>
+        <button id="search-btn-${module}" class="btn secondary" onclick="loadRows('${module}')">${S.lang === 'kh' ? 'ស្វែងរក' : 'Search'}</button>
+        <button class="btn secondary" onclick="csv('${module}',this)">CSV</button>
+      </div>
+      <div class="wrap" id="table"></div>
+    </div>`;
+
+  const fieldCount = (x.fields || []).filter(f => !f.computed && f.name !== 'Created By').length;
+  tableLoading(Math.min(9, fieldCount + 2));
+  await loadRows(module, { reset: true });
+}
+
+async function loadRows(module, options = {}) {
+  const reset = options.reset !== false;
+  const token = (S.requestSeq[module] || 0) + 1;
+  S.requestSeq[module] = token;
+  if (reset) S.page[module] = 1;
+  const page = Math.max(1, Number(S.page[module] || 1));
+  const btn = document.getElementById('search-btn-' + module);
+  const moreBtn = document.getElementById('load-more-' + module);
+
+  if (reset) {
+    setButtonBusy(btn, true, msg('កំពុងស្វែងរក...','Loading...'));
+    const x = S.boot.modules[module];
+    const fieldCount = x ? (x.fields || []).filter(f => !f.computed && f.name !== 'Created By').length : 5;
+    tableLoading(Math.min(9, fieldCount + 2));
+  } else if (moreBtn) {
+    setButtonBusy(moreBtn, true, msg('កំពុងផ្ទុកបន្ថែម...','Loading more...'));
+  }
+
+  setBusy(true, reset ? msg('កំពុងផ្ទុកទិន្នន័យ...','Loading data...') : msg('កំពុងផ្ទុកទិន្នន័យបន្ថែម...','Loading more data...'));
+
+  try {
+    const q = document.getElementById('q')?.value || '';
+    const result = await rpc('apiListModule', module, { q, page, pageSize: S.pageSize });
+    if (token !== S.requestSeq[module]) return;
+
+    if (!result || !result.success) {
+      toast(result && result.message ? result.message : msg('មិនអាចផ្ទុកទិន្នន័យបាន','Unable to load data.'), 'error');
+      if (reset) document.getElementById('table').innerHTML = tableEmpty(msg('មិនអាចផ្ទុកទិន្នន័យបាន','Unable to load data.'));
+      return;
+    }
+
+    const incoming = result.data && Array.isArray(result.data.rows) ? result.data.rows : [];
+    if (reset) {
+      S.rows = incoming;
+    } else {
+      S.rows = S.rows.concat(incoming);
+    }
+    S.hasMore[module] = !!(result.data && result.data.hasMore);
+    S.page[module] = page;
+
+    const x = S.boot.modules[module];
+    const cap = (S.boot.capabilities && S.boot.capabilities[module]) || {};
+    const heads = [
+      x.key,
+      ...(x.fields || []).filter(f => !f.computed && f.name !== 'Created By').slice(0, 6).map(f => f.name)
+    ];
+    if (module === 'contracts') heads.push('Current Contract Amount');
+    if (module === 'warranty') heads.push('Remaining Days', 'Warranty Status');
+    const uniq = [...new Set(heads)];
+
+    if (!S.rows.length) {
+      document.getElementById('table').innerHTML = tableEmpty(q ? msg('រកមិនឃើញលទ្ធផលស្វែងរក','No search results found.') : msg('មិនទាន់មានទិន្នន័យ','No records found.'));
+      return;
+    }
+
+    document.getElementById('table').innerHTML = `
+      <table class="table">
+        <thead>
+          <tr>
+            ${uniq.map(h => `<th>${esc(h)}</th>`).join('')}
+            <th>${S.lang === 'kh' ? 'សកម្មភាព' : 'Actions'}</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${S.rows.map(row => {
+            const id = row[x.key];
+            return `
+              <tr>
+                ${uniq.map(h => `<td>${fmt(h, row[h])}</td>`).join('')}
+                <td class="actions-cell">
+                  <button class="btn tiny secondary" onclick="view('${module}','${esc(id)}')">${S.lang === 'kh' ? 'មើល' : 'View'}</button>
+                  <button class="btn tiny secondary" onclick="edit('${module}','${esc(id)}')">${S.lang === 'kh' ? 'កែ' : 'Edit'}</button>
+                  ${cap.delete ? `<button class="btn tiny danger" onclick="del('${module}','${esc(id)}',this)">${S.lang === 'kh' ? 'លុប' : 'Delete'}</button>` : ''}
+                </td>
+              </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+      ${S.hasMore[module] ? `<div class="load-more-wrap"><button id="load-more-${module}" class="btn secondary" onclick="loadMore('${module}')">${msg('ផ្ទុកទិន្នន័យបន្ថែម','Load More')}</button><span class="muted">${msg('បង្ហាញទិន្នន័យតាមដំណាក់កាល','Data is loaded in batches for better performance')}</span></div>` : ''}`;
+  } catch (error) {
+    if (token !== S.requestSeq[module]) return;
+    toast(errorText(error), 'error');
+    const table = document.getElementById('table');
+    if (table && reset) table.innerHTML = tableEmpty(msg('មានបញ្ហាក្នុងការផ្ទុកទិន្នន័យ','There was a problem loading data.'));
+  } finally {
+    if (token === S.requestSeq[module]) {
+      setButtonBusy(btn, false);
+      setButtonBusy(document.getElementById('load-more-' + module), false);
+    }
+    setBusy(false);
+  }
+}
+
+async function loadMore(module) {
+  S.page[module] = Math.max(1, Number(S.page[module] || 1)) + 1;
+  await loadRows(module, { reset: false });
+}
+
+
+function fmt(key, value) {
+  if (value === null || value === undefined || value === '') return '—';
+  if (/Amount|Budget|Paid|Balance/.test(key)) return esc(money(value));
+  if (/%$/.test(key)) return esc(Number(value || 0).toFixed(1)) + '%';
+  if (/Status/.test(key)) {
+    const text = String(value);
+    const cls = /Approved|Active|Completed|Paid|Resolved|Closed/.test(text)
+      ? 'ok'
+      : /Pending|Draft|Submitted|Expiring/.test(text)
+        ? 'warn'
+        : 'bad';
+    return `<span class="badge ${cls}">${esc(text)}</span>`;
+  }
+  return esc(value);
+}
+
+function refOptions(field, data) {
+  let arr = (S.boot.refs && S.boot.refs[field.relation]) || [];
+  if (field.dependsOn && data[field.dependsOn]) {
+    arr = arr.filter(x => String(x[field.dependsOn] || '') === String(data[field.dependsOn] || ''));
+  }
+
+  const key = (S.boot.modules[field.relation] && S.boot.modules[field.relation].key) || {
+    projects: 'ProjectID',
+    plan: 'PlanID',
+    bidding: 'BiddingID',
+    suppliers: 'SupplierID',
+    contracts: 'ContractID',
+    warranty: 'WarrantyID'
+  }[field.relation] || '';
+
+  return arr.map(item => {
+    let text = item[key] || item.Title || item['Contract No.'] || item['Company Name'] || '';
+    if (field.relation === 'projects') text = item.ProjectID + ' — ' + (item.Title || '');
+    if (field.relation === 'plan') text = item.PlanID + ' — ' + (item.Title || '');
+    if (field.relation === 'contracts') text = item['Contract No.'] + ' — ' + (item['Contract Title'] || '');
+    if (field.relation === 'suppliers') text = item.SupplierID + ' — ' + (item['Company Name'] || '');
+    const optionValue = field.relation === 'contracts' ? item['Contract No.'] : item[key];
+    const selected = String(data[field.name] || '') === String(optionValue || '') ? 'selected' : '';
+    return `<option value="${esc(optionValue || '')}" ${selected}>${esc(text)}</option>`;
+  }).join('');
+}
+
+async function edit(module, id) {
+  S.editId = id;
+  showModal(
+    msg('កំពុងផ្ទុកទិន្នន័យ...','Loading record...'),
+    recordModalSkeleton(),
+    ''
+  );
+  setModalBusy(
+    true,
+    msg('កំពុងផ្ទុកទិន្នន័យ...','Loading record...'),
+    msg('កំពុងទាញយកកំណត់ត្រា','Fetching record from server')
+  );
+  setBusy(true, msg('កំពុងទាញយកកំណត់ត្រា...','Fetching record...'));
+
+  try {
+    const result = await rpc('apiGetRecord', module, id);
+    if (!result || !result.success) {
+      toast(result && result.message ? result.message : msg('រកមិនឃើញកំណត់ត្រា','Record not found.'), 'error');
+      closeModal(true);
+      return;
+    }
+    formModal(module, result.data || {});
+  } catch (error) {
+    toast(errorText(error), 'error');
+    closeModal(true);
+  } finally {
+    setBusy(false);
+    setModalBusy(false);
+  }
+}
+
+function openCreate(module) {
+  S.editId = null;
+  formModal(module, {});
+}
+
+function recordModalSkeleton() {
+  return `
+    <div class="formgrid form-skeleton">
+      ${Array.from({length: 8}, () => `
+        <div>
+          <div class="skeleton-line xs"></div>
+          <div class="skeleton-control"></div>
+        </div>`).join('')}
+    </div>`;
+}
+
+function formModal(module, row) {
+  const x = S.boot.modules[module];
+  let body = '<div class="formgrid">';
+
+  (x.fields || []).forEach((field, index) => {
+    if (field.computed || field.readonly) {
+      if (field.name === 'Created By') return;
+      body += `
+        <div class="form-field">
+          <label class="label">${esc(fl(field))}</label>
+          <input class="input" readonly value="${esc(row[field.name] || '')}">
+        </div>`;
+      return;
+    }
+
+    const id = 'f' + index;
+    const requiredMark = field.required ? ' *' : '';
+
+    if (field.type === 'relation') {
+      body += `
+        <div>
+          <label class="label">${esc(fl(field))}${requiredMark}</label>
+          <select class="select" data-name="${esc(field.name)}" id="${id}" onchange="relationChanged('${module}',this)" ${field.required ? 'required' : ''}>
+            <option value="">-- Select --</option>
+            ${refOptions(field, row)}
+          </select>
+        </div>`;
+    } else if (field.type === 'select') {
+      body += `
+        <div>
+          <label class="label">${esc(fl(field))}${requiredMark}</label>
+          <select class="select" data-name="${esc(field.name)}" id="${id}" ${field.required ? 'required' : ''}>
+            <option value="">-- Select --</option>
+            ${(field.options || []).map(option => `
+              <option value="${esc(option)}" ${String(row[field.name] || '') === String(option) ? 'selected' : ''}>${esc(option)}</option>`).join('')}
+          </select>
+        </div>`;
+    } else if (field.type === 'file') {
+      body += `
+        <div>
+          <label class="label">${esc(fl(field))}${requiredMark}</label>
+          <input class="input" type="file" data-file="${esc(field.name)}" id="${id}">
+          <div class="muted">${esc(msg('ទំហំអតិបរមា 10 MB','Maximum 10 MB'))}</div>
+        </div>`;
+    } else {
+      const type = field.type === 'textarea' ? 'textarea' : field.type === 'number' ? 'number' : field.type === 'date' ? 'date' : 'text';
+      body += `
+        <div class="${type === 'textarea' ? 'full' : ''}">
+          <label class="label">${esc(fl(field))}${requiredMark}</label>
+          ${type === 'textarea'
+            ? `<textarea class="textarea" data-name="${esc(field.name)}" id="${id}" ${field.required ? 'required' : ''}>${esc(row[field.name] || '')}</textarea>`
+            : `<input class="input" type="${type}" data-name="${esc(field.name)}" id="${id}" value="${esc(row[field.name] || '')}" ${field.required ? 'required' : ''}>`}
+        </div>`;
+    }
+  });
+
+  body += '</div>';
+
+  const isEdit = !!S.editId;
+  showModal(
+    isEdit ? `${msg('កែប្រែ','Edit')} — ${label(module)}` : `${msg('បង្កើតថ្មី','Create New')} — ${label(module)}`,
+    body,
+    `<button class="btn secondary" onclick="closeModal()">${msg('បោះបង់','Cancel')}</button>
+     <button id="form-save-btn" class="btn primary" onclick="saveForm('${module}')">${isEdit ? msg('រក្សាទុកការកែប្រែ','Save Changes') : msg('បង្កើត','Create')}</button>`
+  );
+}
+
+function relationChanged(module, el) {
+  const name = el.dataset.name;
+  const data = {};
+  document.querySelectorAll('#modal-body [data-name]').forEach(element => {
+    data[element.dataset.name] = element.value;
+  });
+
+  if (name === 'ProjectID') {
+    (S.boot.modules[module].fields || [])
+      .filter(field => field.dependsOn === 'ProjectID')
+      .forEach(field => {
+        const select = document.querySelector(`#modal-body select[data-name="${CSS.escape(field.name)}"]`);
+        if (select) {
+          select.innerHTML = '<option value="">-- Select --</option>' + refOptions(field, data);
+        }
+      });
+  }
+
+  if (name === 'BiddingID') {
+    const bids = (S.boot.refs && S.boot.refs.bidding) || [];
+    const bidding = bids.find(item => String(item.BiddingID) === String(el.value));
+    const project = document.querySelector('#modal-body select[data-name="ProjectID"]');
+    if (project && bidding) project.value = bidding.ProjectID;
+  }
+}
+
+async function saveForm(module) {
+  if (S.saving) return;
+
+  S.saving = true;
+  const btn = document.getElementById('form-save-btn');
+  const blueText = S.editId
+    ? msg('កំពុងរក្សាទុកការកែប្រែ...','Saving changes...')
+    : msg('កំពុងបង្កើតទិន្នន័យ...','Creating record...');
+  blueLoadingScreen(
+    true,
+    blueText,
+    msg('កំពុងផ្ទៀងផ្ទាត់ និងរក្សាទុកទៅប្រព័ន្ធ','Validating and saving to the system'),
+    'save'
+  );
+  const isEdit = !!S.editId;
+
+  setButtonBusy(btn, true, isEdit ? msg('កំពុងកែប្រែ...','Updating...') : msg('កំពុងបង្កើត...','Creating...'));
+  setModalBusy(
+    true,
+    isEdit ? msg('កំពុងរក្សាទុកការកែប្រែ...','Updating data...') : msg('កំពុងបង្កើតទិន្នន័យ...','Creating data...'),
+    msg('កំពុងផ្ទៀងផ្ទាត់ព័ត៌មាន និងរក្សាទុកទៅប្រព័ន្ធ','Validating data and saving to the system')
+  );
+  setBusy(true, isEdit ? msg('កំពុងកែប្រែទិន្នន័យ...','Updating data...') : msg('កំពុងបង្កើតទិន្នន័យ...','Creating data...'));
+
+  try {
+    const x = S.boot.modules[module];
+    const data = {};
+    const fileTasks = [];
+    let invalid = false;
+
+    (x.fields || []).forEach(field => {
+      if (field.computed || field.readonly) return;
+
+      const element = document.querySelector(`#modal-body [data-name="${CSS.escape(field.name)}"]`);
+      const fileElement = document.querySelector(`#modal-body [data-file="${CSS.escape(field.name)}"]`);
+
+      if (fileElement && fileElement.files && fileElement.files[0]) {
+        fileTasks.push(filePayload(fileElement.files[0], field.name));
+      }
+
+      if (element) {
+        if (field.required && !String(element.value || '').trim()) {
+          element.classList.add('input-error');
+          invalid = true;
+        } else {
+          element.classList.remove('input-error');
+        }
+        data[field.name] = element.value;
+      }
+    });
+
+    if (invalid) {
+      setModalBusy(false);
+      toast(msg('សូមបំពេញព័ត៌មានដែលចាំបាច់។','Please complete all required fields.'), 'error');
+      const firstError = document.querySelector('.input-error');
+      if (firstError) firstError.focus();
+      return;
+    }
+
+    let files = [];
+    if (fileTasks.length) {
+      blueLoadingScreen(
+        true,
+        msg('កំពុងរៀបចំឯកសារ...','Preparing attachments...'),
+        msg('កំពុងអានឯកសារមុនរក្សាទុក','Preparing selected files before save'),
+        'save'
+      );
+      setModalBusy(
+        true,
+        msg('កំពុងរៀបចំឯកសារ...','Preparing attachments...'),
+        msg('កំពុងអានឯកសារមុនរក្សាទុក','Preparing selected files before save')
+      );
+      files = await Promise.all(fileTasks);
+    }
+
+    blueLoadingScreen(
+      true,
+      isEdit ? msg('កំពុងរក្សាទុកការកែប្រែ...','Saving changes...') : msg('កំពុងបង្កើតទិន្នន័យ...','Creating record...'),
+      msg('Server កំពុងផ្ទៀងផ្ទាត់ Duplicate និង Relationship','Server is validating duplicates and relationships'),
+      'save'
+    );
+    setModalBusy(
+      true,
+      isEdit ? msg('កំពុងរក្សាទុកការកែប្រែ...','Saving changes...') : msg('កំពុងបង្កើតទិន្នន័យ...','Creating record...'),
+      msg('Server កំពុងផ្ទៀងផ្ទាត់ Duplicate និង Relationship','Server is validating duplicates and relationships')
+    );
+
+    let result;
+    if (isEdit) {
+      result = await rpc('updateRecord', module, S.editId, data);
+    } else if (files.length) {
+      result = await rpc('createRecord', module, data, files);
+    } else {
+      result = await rpc('createRecord', module, data);
+    }
+
+    if (!result || !result.success) {
+      toast(result && result.message ? result.message : msg('រក្សាទុកមិនបានសម្រេច','Save was not completed.'), 'error');
+      return;
+    }
+
+    blueLoadingScreen(
+      true,
+      msg('បានរក្សាទុកជោគជ័យ','Saved successfully'),
+      msg('កំពុងផ្ទុកបញ្ជីទិន្នន័យថ្មី...','Refreshing the data list...'),
+      'save-success'
+    );
+    setModalBusy(
+      true,
+      msg('បានរក្សាទុកជោគជ័យ','Saved successfully'),
+      msg('កំពុងផ្ទុកបញ្ជីទិន្នន័យថ្មី...','Refreshing the data list...')
+    );
+
+    const message = result.message || (isEdit ? msg('បានកែប្រែជោគជ័យ','Updated successfully.') : msg('បានបង្កើតជោគជ័យ','Created successfully.'));
+    closeModal(true);
+    toast(message, 'success');
+
+    await loadRows(module, { reset: true });
+    dashboardIf();
+  } catch (error) {
+    toast(errorText(error), 'error');
+  } finally {
+    blueLoadingScreen(false);
+    S.saving = false;
+    setBusy(false);
+    setModalBusy(false);
+    setButtonBusy(btn, false);
+  }
+}
+
+function filePayload(file, fieldName) {
+  return new Promise((resolve, reject) => {
+    if (!file) return resolve(null);
+    if (file.size > 10 * 1024 * 1024) {
+      reject(new Error(msg('ឯកសារធំពេក។ អតិបរមា 10 MB។','File is too large. Maximum is 10 MB.')));
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => resolve({
+      name: file.name,
+      mimeType: file.type,
+      size: file.size,
+      base64: String(reader.result).split(',')[1],
+      fieldName
+    });
+    reader.onerror = () => reject(new Error(msg('មិនអាចអានឯកសារបាន','Unable to read file.')));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function del(module, id, btn) {
+  if (!confirm(msg('បញ្ជាក់ការលុបកំណត់ត្រានេះ?','Delete this record?'))) return;
+
+  setButtonBusy(btn, true, msg('កំពុងលុប...','Deleting...'));
+  setBusy(true, msg('កំពុងលុបកំណត់ត្រា...','Deleting record...'));
+
+  try {
+    const result = await rpc('softDeleteRecord', module, id);
+    if (!result || !result.success) {
+      toast(result && result.message ? result.message : msg('លុបមិនបានសម្រេច','Delete was not completed.'), 'error');
+      return;
+    }
+
+    toast(result.message || msg('បានលុបជោគជ័យ','Deleted successfully.'), 'success');
+    await loadRows(module, { reset: true });
+    dashboardIf();
+  } catch (error) {
+    toast(errorText(error), 'error');
+  } finally {
+    setBusy(false);
+    setButtonBusy(btn, false);
+  }
+}
+
+async function view(module, id) {
+  showModal(
+    msg('កំពុងផ្ទុកទិន្នន័យ...','Loading record...'),
+    recordModalSkeleton(),
+    ''
+  );
+  setModalBusy(
+    true,
+    msg('កំពុងផ្ទុកកំណត់ត្រា...','Loading record...'),
+    msg('កំពុងទាញយកព័ត៌មានពី Server','Fetching record details from the server')
+  );
+  setBusy(true, msg('កំពុងទាញយកកំណត់ត្រា...','Fetching record...'));
+
+  try {
+    const result = await rpc('apiGetRecord', module, id);
+    if (!result || !result.success) {
+      toast(result && result.message ? result.message : msg('រកមិនឃើញកំណត់ត្រា','Record not found.'), 'error');
+      closeModal(true);
+      return;
+    }
+
+    const x = S.boot.modules[module];
+    const record = result.data || {};
+    const body = `
+      <div class="grid2">
+        ${(x.fields || []).map(field => `
+          <div class="card detail-card">
+            <div class="muted">${esc(fl(field))}</div>
+            <b>${fmt(field.name, record[field.name])}</b>
+          </div>`).join('')}
+      </div>`;
+
+    showModal(
+      `${label(module)} — ${esc(id)}`,
+      body,
+      `<button class="btn secondary" onclick="closeModal()">${msg('បិទ','Close')}</button>`
+    );
+  } catch (error) {
+    toast(errorText(error), 'error');
+    closeModal(true);
+  } finally {
+    setBusy(false);
+    setModalBusy(false);
+  }
+}
+
+async function globalSearch(query) {
+  const q = String(query || '').trim();
+  if (!q) {
+    toast(msg('សូមបញ្ចូលពាក្យស្វែងរក','Please enter a search term.'), 'warn');
+    return;
+  }
+
+  setBusy(true, msg('កំពុងស្វែងរកទូទាំងប្រព័ន្ធ...','Searching the system...'));
+  try {
+    const result = await rpc('searchAll', q);
+    if (!result || !result.success) {
+      toast(result && result.message ? result.message : msg('ស្វែងរកមិនបាន','Search failed.'), 'error');
+      return;
+    }
+
+    showModal(
+      msg('លទ្ធផលស្វែងរក','Search Results'),
+      result.data && result.data.length
+        ? `<div class="wrap"><table class="table">
+             <thead><tr><th>Module</th><th>ID</th><th>Title</th><th>Status</th><th></th></tr></thead>
+             <tbody>${result.data.map(item => `
+               <tr>
+                 <td>${esc(label(item.module))}</td>
+                 <td>${esc(item.id)}</td>
+                 <td>${esc(item.title)}</td>
+                 <td>${fmt('Status', item.status)}</td>
+                 <td><button class="btn tiny secondary" onclick="closeModal();navigate('${item.module}');setTimeout(()=>edit('${item.module}','${esc(item.id)}'),250)">${S.lang === 'kh' ? 'បើក' : 'Open'}</button></td>
+               </tr>`).join('')}</tbody>
+           </table></div>`
+        : tableEmpty(msg('រកមិនឃើញលទ្ធផល','No results found.')),
+      `<button class="btn secondary" onclick="closeModal()">${msg('បិទ','Close')}</button>`
+    );
+  } catch (error) {
+    toast(errorText(error), 'error');
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function csv(module, btn) {
+  setButtonBusy(btn, true, msg('កំពុងទាញយក...','Exporting...'));
+  setBusy(true, msg('កំពុងបង្កើត CSV...','Generating CSV...'));
+  try {
+    const result = await rpc('apiExportCsv', module, {});
+    if (!result || !result.success) {
+      toast(result && result.message ? result.message : msg('Export មិនបានសម្រេច','Export failed.'), 'error');
+      return;
+    }
+
+    const anchor = document.createElement('a');
+    anchor.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(result.data.content);
+    anchor.download = result.data.name;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    toast(msg('បានទាញយក CSV ជោគជ័យ','CSV exported successfully.'), 'success');
+  } catch (error) {
+    toast(errorText(error), 'error');
+  } finally {
+    setBusy(false);
+    setButtonBusy(btn, false);
+  }
+}
+
+function dashboardIf() {
+  if (S.module === 'dashboard') dashboard();
+}
+
+async function reports() {
+  document.getElementById('view').innerHTML = `
+    <div class="title">${S.lang === 'kh' ? 'របាយការណ៍' : 'Reports'}</div>
+    <div class="subtitle">${S.lang === 'kh' ? 'Export CSV តាម Module' : 'CSV export by module'}</div>
+    <div class="card report-card">
+      <div class="toolbar">
+        ${Object.keys(S.boot.modules).map(module => `<button class="btn secondary" onclick="csv('${module}',this)">${esc(label(module))}</button>`).join('')}
+      </div>
+    </div>`;
+}
+
+async function dataQuality() {
+  document.getElementById('view').innerHTML = `
+    <div class="title">${S.lang === 'kh' ? 'គុណភាពទិន្នន័យ' : 'Data Quality'}</div>
+    <div class="subtitle">${S.lang === 'kh' ? 'ពិនិត្យ Duplicate, Relationship និងទិន្នន័យខុសប្រក្រតី' : 'Check duplicates, relationships and invalid records'}</div>
+    <div class="card report-card">
+      <button id="dq-btn" class="btn primary" onclick="dqRun()">${S.lang === 'kh' ? 'ដំណើរការត្រួតពិនិត្យ' : 'Run Check'}</button>
+      <div id="dq" style="margin-top:12px"></div>
+    </div>`;
+}
+
+async function dqRun() {
+  const btn = document.getElementById('dq-btn');
+  setButtonBusy(btn, true, msg('កំពុងពិនិត្យ...','Checking...'));
+  setBusy(true, msg('កំពុងពិនិត្យគុណភាពទិន្នន័យ...','Checking data quality...'));
+  const target = document.getElementById('dq');
+  if (target) target.innerHTML = `<div class="inline-loading"><div class="spinner"></div>${esc(msg('កំពុងពិនិត្យទិន្នន័យ...','Checking records...'))}</div>`;
+
+  try {
+    const result = await rpc('apiGetDataQuality');
+    if (!result || !result.success) {
+      toast(result && result.message ? result.message : msg('មិនអាចពិនិត្យបាន','Unable to run data quality check.'), 'error');
+      return;
+    }
+
+    target.innerHTML = result.data.count
+      ? `<div class="badge bad">${esc(result.data.count)} issues</div><div class="wrap" style="margin-top:8px">${result.data.rows.map(row => `<div class="dq-row">${row.map(esc).join(' | ')}</div>`).join('')}</div>`
+      : `<div class="badge ok">PASS</div>`;
+  } catch (error) {
+    toast(errorText(error), 'error');
+  } finally {
+    setBusy(false);
+    setButtonBusy(btn, false);
+  }
+}
+
+async function users() {
+  document.getElementById('view').innerHTML = `
+    <div class="page-head">
+      <div class="title">${S.lang === 'kh' ? 'អ្នកប្រើប្រាស់' : 'Users'}</div>
+      <button class="btn primary" onclick="userModal()">${S.lang === 'kh' ? 'បន្ថែមអ្នកប្រើប្រាស់' : 'Add User'}</button>
+    </div>
+    <div class="card report-card">
+      <div class="inline-loading"><div class="spinner"></div>${esc(msg('កំពុងផ្ទុកអ្នកប្រើប្រាស់...','Loading users...'))}</div>
+      <div id="users-table"></div>
+    </div>`;
+
+  setBusy(true, msg('កំពុងផ្ទុកអ្នកប្រើប្រាស់...','Loading users...'));
+  try {
+    const result = await rpc('apiUsers');
+    if (!result || !result.success) {
+      toast(result && result.message ? result.message : msg('មិនអាចផ្ទុកអ្នកប្រើប្រាស់បាន','Unable to load users.'), 'error');
+      return;
+    }
+    document.getElementById('users-table').innerHTML = objTable(result.data, ['Email','Name','Role','Status']);
+    document.querySelector('#users-table')?.previousElementSibling?.remove();
+  } catch (error) {
+    toast(errorText(error), 'error');
+  } finally {
+    setBusy(false);
+  }
+}
+
+function objTable(rows, cols) {
+  return `<div class="wrap"><table class="table"><thead><tr>${cols.map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${(rows || []).map(row => `<tr>${cols.map(c => `<td>${esc(row[c])}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+}
+
+function userModal() {
+  showModal(
+    msg('អ្នកប្រើប្រាស់','User'),
+    `<div class="formgrid">
+      <div><label class="label">Email</label><input id="ue" class="input"></div>
+      <div><label class="label">Name</label><input id="un" class="input"></div>
+      <div><label class="label">Role</label><select id="ur" class="select">${S.boot.roles.map(role => `<option>${esc(role)}</option>`).join('')}</select></div>
+      <div><label class="label">Status</label><select id="us" class="select"><option>Active</option><option>Inactive</option></select></div>
+    </div>`,
+    `<button class="btn secondary" onclick="closeModal()">${msg('បោះបង់','Cancel')}</button><button id="user-save-btn" class="btn primary" onclick="saveUser()">${msg('រក្សាទុក','Save')}</button>`
+  );
+}
+
+async function saveUser() {
+  const btn = document.getElementById('user-save-btn');
+  setButtonBusy(btn, true, msg('កំពុងរក្សាទុក...','Saving...'));
+  setModalBusy(true, msg('កំពុងរក្សាទុកអ្នកប្រើប្រាស់...','Saving user...'), msg('កំពុងបញ្ជូនទៅ Server','Sending to server'));
+  setBusy(true, msg('កំពុងរក្សាទុកអ្នកប្រើប្រាស់...','Saving user...'));
+
+  try {
+    const result = await rpc('apiSaveUser', {
+      Email: document.getElementById('ue').value,
+      Name: document.getElementById('un').value,
+      Role: document.getElementById('ur').value,
+      Status: document.getElementById('us').value
+    });
+    if (!result || !result.success) {
+      toast(result && result.message ? result.message : msg('រក្សាទុកមិនបាន','Save failed.'), 'error');
+      return;
+    }
+    closeModal(true);
+    toast(result.message || msg('បានរក្សាទុកជោគជ័យ','Saved successfully.'), 'success');
+    await users();
+  } catch (error) {
+    toast(errorText(error), 'error');
+  } finally {
+    setBusy(false);
+    setModalBusy(false);
+    setButtonBusy(btn, false);
+  }
+}
+
+async function audit() {
+  document.getElementById('view').innerHTML = `
+    <div class="title">Audit Log</div>
+    <div class="card report-card"><div class="inline-loading"><div class="spinner"></div>${esc(msg('កំពុងផ្ទុក Audit Log...','Loading audit log...'))}</div><div id="audit-table"></div></div>`;
+  setBusy(true, msg('កំពុងផ្ទុក Audit Log...','Loading audit log...'));
+  try {
+    const result = await rpc('apiAudit');
+    if (!result || !result.success) {
+      toast(result && result.message ? result.message : msg('មិនអាចផ្ទុក Audit Log បាន','Unable to load audit log.'), 'error');
+      return;
+    }
+    document.getElementById('audit-table').innerHTML = objTable(result.data, ['Timestamp','User Email','Action','Module','RecordID','Result','Summary']);
+    document.querySelector('#audit-table')?.previousElementSibling?.remove();
+  } catch (error) {
+    toast(errorText(error), 'error');
+  } finally {
+    setBusy(false);
+  }
+}
+
+function toast(text, type = 'info') {
+  const el = document.getElementById('toast');
+  if (!el) return;
+  if (S.toastTimer) clearTimeout(S.toastTimer);
+
+  el.className = `toast ${type}`;
+  el.innerHTML = `<span class="toast-icon">${type === 'success' ? '✓' : type === 'error' ? '!' : type === 'warn' ? '!' : 'i'}</span><span>${esc(text || '')}</span>`;
+  el.style.display = 'flex';
+  requestAnimationFrame(() => el.classList.add('show'));
+
+  S.toastTimer = setTimeout(() => {
+    el.classList.remove('show');
+    setTimeout(() => { el.style.display = 'none'; }, 180);
+  }, 3200);
+}
+
+const APP_NAME = 'Government Procurement & Contract Management System';
+window.addEventListener('load', init);
+window.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !S.modalBusy) closeModal();
+});
+</script>
